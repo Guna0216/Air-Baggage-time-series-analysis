@@ -1,0 +1,304 @@
+---
+title: "EAS 509: Statistical Data Mining II - Project"
+author:
+  - "Sri Guna Kaushik Undru - srigunak"
+  - "Shri Harsha Thirumala Adapala - sadapala"
+output: pdf_document
+date: "2023-11-26"
+---
+
+
+
+```{r setup, warning=F, message=F,echo=F}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tibble)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(lubridate)
+library(ggplot2)
+library(ggfortify)
+library(forecast)
+library(tseries)
+library(zoo)
+library(purrr)
+# tsibble: tidy temporal data frames and tools
+library(tsibble)
+
+# fable (forecast table)
+library(fable)
+
+# fabletools - provides tools for building modelling packages, with a focus on time series forecasting
+library(fabletools)
+
+# Feature Extraction and Statistics for Time Series in tsibble format
+library(feasts)
+
+# tsibbledata: used datasets for example global_economy
+library(tsibbledata)
+options(warn=-1)
+```
+
+
+Loading the dataset
+
+
+```{r}
+complaints <- readr::read_csv("baggagecomplaints.csv",show_col_types = FALSE)
+head(complaints)
+```
+```{r}
+complaints <- complaints %>%
+  mutate(
+    Date_new = paste(Year, Month, "01", sep = " "),
+    Date_new = as.yearmon(Date_new, "%Y %m")
+  ) %>%
+  select(-c(Date, Month, Year)) %>%
+  rename(Date = Date_new)
+head(complaints)
+```
+```{r}
+complaints %>%
+  mutate(Date=yearmonth(Date)) %>% 
+  tsibble(
+    index = Date,
+    key = Airline
+    ) -> complaints
+head(complaints)
+```
+
+```{r}
+complaints %>%
+  autoplot(Baggage) +
+  labs(x = "Date", y = "Number of Complaints", title = "Trend in Passenger Complaints for Airlines")
+```
+
+The data suggests that American and United Airlines experience more ups and downs in their baggage-related complaints. Additionally, since Hawaiian Airlines operates fewer flights, it's more meaningful to compare the number of complaints relative to the number of flights, rather than just looking at the total complaints. To get a clearer picture, we should identify the months with the most complaints over time, using a measure that takes into account the number of flights.
+
+```{r}
+complaints_summary <- complaints %>%
+  group_by(Airline) %>%
+  summarise(
+    Scheduled = mean(Scheduled, na.rm = TRUE),
+    Enplaned = mean(Enplaned, na.rm = TRUE),
+    Count = n()
+  )
+complaints_summary
+```
+
+United Airlines is a lot larger than many other airlines. In the above summarizing data frame, one can see it has about three times as many flights and passengers as American Eagle, and about eight times more than Hawaiian Airlines. So, United Airlines ends up dealing with more bags simply because it serves a lot more passengers.
+
+To cater with the company size/disparity among comparison. We will scale the complaints count with respect the Enplaned trips.
+
+```{r}
+complaints <- complaints %>%
+  mutate(
+    "Baggage_%" = (Baggage/Enplaned) * 100
+  )
+head(complaints)
+```
+```{r}
+complaints %>%
+  autoplot(`Baggage_%`) +
+  labs(x = "Date", y = "Relative Number of Complaints", title = "Trend in Passenger Complaints for Airlines(Scaled)")
+```
+
+```{r}
+complaints %>% model(
+  classical_decomposition(`Baggage_%`)
+  ) %>% components() %>%
+  autoplot()
+```
+Upon doing classical additive decomposition, we can say that
+1) All airlines show a generally stable or slightly increasing trend with United having the highest level and Hawaiian the lowest.
+2) There is seasonality present and seasonal swings for American Eagle and United are quite similar and more pronounced than for Hawaiian.
+
+Splitting the data frame into training and testing sets, where the testing set includes data from January 2010 to December 2010.
+```{r}
+complaints_train <- complaints %>% filter(Date < yearmonth("2010 01"))
+complaints_test <- complaints %>% filter(Date >= yearmonth("2010 01"))
+```
+
+```{r}
+fit <- complaints_train %>%
+  model(
+    Seasonal_naive = SNAIVE(Baggage),
+    Naive = NAIVE(Baggage),
+    Drift = RW(Baggage ~ drift()),
+    Mean = MEAN(Baggage)
+  )
+
+fc <- fit %>%
+  forecast(h = "1 year")
+
+z <- fc %>%
+  hilo(level = 95) %>%
+  pull(`95%`)
+z$lower
+```
+```{r}
+fc %>% autoplot(complaints_train, level = NULL) +
+  labs(
+    title = "Baggage complaints of airlines",
+    y = "Complaints"
+  ) +
+  autolayer(complaints_test, color = "black") +
+  guides(colour = guide_legend(title = "Forecast"))
+```
+Based on visual inspection, it appears that the Seasonal Naive model most closely follows the pattern observed in the actual test data among the four basic models considered. However, this assessment is solely based on visual analysis.
+```{r}
+sn_fit <- fit %>%
+  select(Seasonal_naive)
+num_models <- nrow(sn_fit)
+```
+```{r}
+suppressWarnings({
+  model <- sn_fit[1, ]
+plot <- gg_tsresiduals(model) +
+        labs(title = paste("Residual Plot for", model$Airline, "Airlines - Seasonal Naive"))
+
+print(plot)
+})
+```
+```{r}
+suppressWarnings({
+  model <- sn_fit[2, ]
+  plot <- gg_tsresiduals(model) +
+          labs(title = paste("Residual Plot for", model$Airline, "Airlines - Seasonal Naive"))
+  
+  print(plot)
+})
+```
+```{r}
+suppressWarnings({
+  model <- sn_fit[3, ]
+  plot <- gg_tsresiduals(model) +
+          labs(title = paste("Residual Plot for", model$Airline, "Airlines - Seasonal Naive"))
+  
+  print(plot)
+})
+```
+The presence of any systematic structure in the residuals plots or significant autocorrelation at various lags would suggest that the model can be further improved.
+
+Now, lets try modelling with ETS(AAA) model
+```{r}
+ets_fit <- complaints_train %>%
+  model(additive = ETS(Baggage ~ error("A") + trend("A") + season("A")))
+
+ets_fc <- ets_fit %>%
+  forecast(h = "1 year")
+
+ets_fc %>% autoplot(complaints_train) +
+  labs(
+    title = "Baggage - ETS(AAA)",
+    y = "complaints"
+  ) +
+  autolayer(complaints_test, color = "black") +
+  guides(colour = guide_legend(title = "Forecast"))
+```
+Based on visual inspection, it appears that the ETS(AAA) model closely follows the pattern observed in the actual test data compared to the four basic models considered before. However, this assessment is solely based on visual analysis.
+
+```{r}
+# Extract the residuals
+num_models <- nrow(ets_fit)
+```
+```{r}
+model <- ets_fit[1, ]
+
+    # Generate the residual plot
+    plot <- gg_tsresiduals(model) +
+            labs(title = paste("Residual Plot for", model$Airline, "Airlines - ETS(AAA)"))
+    print(plot)
+```
+```{r}
+model <- ets_fit[2, ]
+
+    # Generate the residual plot
+    plot <- gg_tsresiduals(model) +
+            labs(title = paste("Residual Plot for", model$Airline, "Airlines - ETS(AAA)"))
+    print(plot)
+```
+```{r}
+model <- ets_fit[3, ]
+
+    # Generate the residual plot
+    plot <- gg_tsresiduals(model) +
+            labs(title = paste("Residual Plot for", model$Airline, "Airlines - ETS(AAA)"))
+    print(plot)
+```
+The above residual plots suggests that while the ETS(AAA) model has captured much of the data's behavior, but there are instances where it fails to predict accurately, as indicated by the spikes in the time series plot and the few significant autocorrelations in the ACF plot.The histogram's shape also suggests that the residuals may not be normally distributed.
+
+Now lets try with the ARIMA model.
+```{r}
+arima_fit <- complaints_train %>%
+  model(arima = ARIMA(Baggage))
+
+# Forecast for a 1-year horizon
+arima_fc <- arima_fit %>%
+  forecast(h = "1 year")
+
+arima_fit %>%
+  select(arima) %>%
+  report()
+```
+```{r}
+# Plot the forecast and the original training data
+suppressWarnings({
+  arima_fc %>% autoplot(complaints_train) +
+    labs(
+      title = "Baggage - ARIMA",
+      y = "complaints"
+    ) +
+    autolayer(complaints_test, color = "black") +
+    guides(colour = guide_legend(title = "Forecast"))
+})
+```
+```{r}
+# Extract the residuals
+num_models <- nrow(arima_fit)
+```
+```{r}
+model <- arima_fit[1, ]
+
+    # Generate the residual plot
+plot <- gg_tsresiduals(model) +
+        labs(title = paste("Residual Plot for", model$Airline, "Airlines -  ARIMA"))
+print(plot)
+```
+```{r}
+model <- arima_fit[2, ]
+
+    # Generate the residual plot
+plot <- gg_tsresiduals(model) +
+        labs(title = paste("Residual Plot for", model$Airline, "Airlines -  ARIMA"))
+print(plot)
+```
+```{r}
+model <- arima_fit[3, ]
+
+    # Generate the residual plot
+plot <- gg_tsresiduals(model) +
+        labs(title = paste("Residual Plot for", model$Airline, "Airlines -  ARIMA"))
+print(plot)
+```
+The above plots depicts a residual plots for all the Airlines using an ARIMA model. The top plot shows the residuals (errors) over time, which do not display any obvious patterns or trends, suggesting the model's errors are random, which is a good sign in time series forecasting. The bottom left plot is the autocorrelation function (ACF) of residuals, showing that most lags are within the confidence interval, indicating little to no autocorrelation. The bottom right is a histogram of the residuals, which seems fairly normally distributed around zero. Overall, these diagnostics suggest the ARIMA model fits the data reasonably well, with no apparent autocorrelation issues and residuals that are approximately normally distributed.
+## lets compare the BIC and AIC errors for both ETS(AAA) & SARIMA models
+```{r}
+report(ets_fit)
+```
+```{r}
+report(arima_fit)
+```
+You can see that, there is huge difference in the AIC and BIC values between the two models indicating better performance of SARIMA model
+
+## Lets see the p-values for ETS(AAA) and SARIMA model
+```{r}
+augment(arima_fit %>% select(arima)) %>%
+  features(.resid, ljung_box, lag = 24, dof = 16)
+```
+```{r}
+augment(ets_fit %>% select(additive)) %>%
+  features(.resid, ljung_box, lag = 24, dof = 16)
+```
+The data indicates that p_values for SARIMA model are significant compared to the ETS(AAA) model.
